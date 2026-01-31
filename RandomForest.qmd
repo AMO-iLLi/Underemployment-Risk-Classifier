@@ -63,6 +63,28 @@ train_set <- read_csv(
     overqualified = col_factor()
   )
 )
+
+# Replace NA with 999 (keep factor columns as factors)
+replace_na_999 <- function(df) {
+  df %>%
+    mutate(
+      across(where(is.factor), ~ forcats::fct_explicit_na(.x, na_level = "999")),
+      across(where(is.character), ~ tidyr::replace_na(.x, "999")),
+      across(where(is.numeric), ~ tidyr::replace_na(.x, 999))
+    )
+}
+
+train_set <- replace_na_999(train_set)
+test_set  <- replace_na_999(test_set)
+
+sapply(train_set, function(x) sum(is.na(x)))
+levels(train_set$CERTLEVP)
+
+train_set <- train_set %>% select(-id)
+test_set  <- test_set  %>% select(-id)
+
+train_set$overqualified <- as.factor(train_set$overqualified)
+
 ```
 
 # Splitting data
@@ -83,14 +105,19 @@ testing_data <- train_set[train_test == "Test",]
 # Random Forest
 ```{r}
 
-pro_rf <- randomForest(
-  overqualified ~ . - id,
+#the one that worked 
+set.seed(42)
+rf_model <- randomForest(
+  overqualified ~ .,
+  data = train_set,
+  ntree = 700,
   mtry = 9,
-  data = training_data %>% drop_na(),
-  importance = TRUE,
-  ntree = 1000,
-  keep.forest = TRUE
+  classwt = c("0" = 1, "1" = 2),
+  importance = TRUE
 )
+rf_model
+
+
 
 
 all_mtry <- c(6,7,8,9,10,11)
@@ -111,4 +138,3 @@ hist(treesize(pro_rf))
 print(pro_rf)
 varImpPlot(pro_rf)
 ```
-
