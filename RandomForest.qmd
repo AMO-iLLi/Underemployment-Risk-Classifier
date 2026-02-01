@@ -23,9 +23,6 @@ train_set <- read_csv(
   col_types = cols(
     id            = col_double(),
     
-    # Target
-    overqualified = col_double(),
-    
     # Education & Program Features
     CERTLEVP  = col_factor(),
     PGMCIPAP  = col_factor(),
@@ -59,10 +56,10 @@ train_set <- read_csv(
     
     # Pre-program work
     BEF_P140 = col_factor(),
-    BEF_160  = col_double(),
-    overqualified = col_factor()
+    BEF_160  = col_double()
   )
 )
+train_set$overqualified <- factor(train_set$overqualified, c(0,1))
 ```
 
 # Splitting data
@@ -76,28 +73,77 @@ train_test <- sample(c("Train", "Test"),
                      size = n, replace = TRUE, 
                      prob = c(prop_train, prop_test))
 
-training_data <- train_set[train_test == "Train", ]
-testing_data <- train_set[train_test == "Test",]
+training_data <- drop_na(train_set[train_test == "Train", ])
+testing_data <- drop_na(train_set[train_test == "Test",])
 ```
 
 # Random Forest
 ```{r}
+get_MSPE <- function(Y, Y.hat){ 
+  mean((Y - Y.hat)^2)
+}
 
-pro_rf <- randomForest(
-  overqualified ~ . - id,
-  mtry = 9,
-  data = training_data %>% drop_na(),
-  importance = TRUE,
-  ntree = 1000,
-  keep.forest = TRUE
-)
-
-
-all_mtry <- c(6,7,8,9,10,11)
+all_mtry <- c(6,7,8,9,10,11,12,15)
 all_nodesize <- c(1,2,3,5,8,10,15,20)
 all_pars <- expand.grid(mtry = all_mtry, nodesize = all_nodesize)
 n_pars <- nrow(all_pars)
+M <- 5
 
+n <- nrow(training_data)
+fold_id <- sample(rep(1:M, length.out = n))
+
+CV_MSPEs <- matrix(0, nrow = M, ncol = n_pars)
+
+for (i in 1:n_pars) {
+  cat("Parameter set", i, "of", n_pars, "\n")
+  
+  this_mtry      <- all_pars$mtry[i]
+  this_nodesize  <- all_pars$nodesize[i]
+  
+  for (j in 1:M) {
+    train_idx <- which(fold_id != j)
+    val_idx   <- which(fold_id == j)
+    
+    train_fold <- training_data[train_idx, ]
+    val_fold   <- training_data[val_idx, ]
+    
+    fit_rf <- ranger(
+      overqualified ~ . - id, 
+      data = train_fold,
+      mtry = this_mtry,
+      min.node.size = this_nodesize,
+      num.trees = 500
+    )
+    
+    pred <- predict(fit_rf, val_fold)$predictions
+    CV_MSPEs[j, i] <- get_MSPE(val_fold$overqualified, pred)
+  }
+}
+
+names_pars <- paste0(all_pars$mtry, "-", all_pars$nodesize)
+colnames(CV_MSPEs) <- names_pars
+
+best_idx <- which.min(colMeans(CV_MSPEs))
+best_params <- all_pars[best_idx, ]
+```
+
+```{r}
+vars_keep <- c(
+  "CERTLEVP", "PGMCIPAP", "HLOSGRDP", "PREVLEVP", "GRADAGEP",
+  "BEF_P140", "BEF_160",
+  "PGM_P034", "PGM_P036", "PGM_P401",
+  "STULOANS", "SCHOLARP",
+  "PAR1GRD", "PAR2GRD",
+  "CTZSHIPP", "VISBMINP", "overqualified"
+)
+
+pro_rf <- randomForest(
+  data = select(training_data, vars_keep), overqualified ~ .,
+  importance = TRUE, ntree = 500, mtry = 10, nodesize = 1,
+  keep.forest = TRUE
+)
+
+pro_rf$importance
 ```
 
 # Visuals
@@ -110,5 +156,134 @@ hist(treesize(pro_rf))
 
 print(pro_rf)
 varImpPlot(pro_rf)
+
+auc_val <- as.numeric(auc(roc(truth, prob)))
+```
+
+
+```{r}
+library(caret)
+
+# One-hot encode categorical columns
+categorical_cols <- names(X)[sapply(X, is.factor)]
+dummies <- dummyVars(~ ., training_data = X[, categorical_cols])
+X_cat <- predict(dummies, newdata = X[, categorical_cols])
+
+# Combine with numeric columns
+numeric_cols <- names(X)[sapply(X, is.numeric)]
+X_num <- X[, numeric_cols]
+X_encoded <- cbind(X_num, X_cat)
+
+for (col in categorical_cols) {
+  X[[col]] <- as.integer(as.factor(X[[col]])) - 1  # 0-indexed
+}
+
+# Identify categorical columns
+categorical_cols <- names(training_data)[sapply(training_data, is.factor)]
+numeric_cols <- setdiff(vars_keep, c(categorical_cols, "overqualified"))
+
+# Label encode
+for (col in categorical_cols) {
+  training_data[[col]] <- as.integer(as.factor(training_data[[col]])) - 1
+}
+
+# Prepare X and y
+X <- as.matrix(training_data[, setdiff(vars_keep, "overqualified")])
+y <- as.numeric(training_data$overqualified)
+
+# DMatrix for XGBoost
+dtrain <- xgb.DMatrix(data = X, label = y)
+
+# Example simple parameter set
+params <- list(
+  objective = "binary:logistic",
+  eval_metric = "auc",
+  max_depth = 6,
+  eta = 0.1,
+  subsample = 0.8,
+  colsample_bytree = 0.8
+)
+
+# Cross-validation to find best nrounds
+cv <- xgb.cv(
+  params = params,
+  data = dtrain,
+  nrounds = 500,
+  nfold = 5,
+  early_stopping_rounds = 10,
+  verbose = 1
+)
+
+best_nrounds <- cv$best_iteration
+cat("Best nrounds:", best_nrounds, "\n")
+
+# Train final model
+xgb_model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = best_nrounds
+)
+
+```
+
+# XGBoost
+```{r}
+# Load libraries
+library(xgboost)
+library(caret)
+library(dplyr)
+
+# Prepare data
+# Assuming your target is "overqualified" and data is in training_data
+vars_keep <- names(training_data)  # or your selected features
+data <- training_data %>% select(all_of(vars_keep))
+
+# Convert target to numeric (XGBoost requires 0/1)
+data$overqualified <- as.numeric(data$overqualified)
+
+# Split into features and labels
+X <- data %>% select(-overqualified) %>% as.matrix()
+y <- data$overqualified
+
+# Create a DMatrix (optimized structure for XGBoost)
+dtrain <- xgb.DMatrix(data = X, label = y)
+
+# Define parameter grid for tuning
+xgb_grid <- expand.grid(
+  nrounds = c(100, 200, 500),       # number of boosting rounds
+  max_depth = c(3, 6, 9),           # max tree depth
+  eta = c(0.01, 0.1, 0.3),          # learning rate
+  gamma = c(0, 1, 5),               # minimum loss reduction
+  colsample_bytree = c(0.6, 0.8, 1),# subsample ratio of columns
+  min_child_weight = c(1, 5, 10),   # minimum sum of instance weight
+  subsample = c(0.6, 0.8, 1)        # row sampling
+)
+
+# Set up cross-validation
+train_control <- trainControl(
+  method = "cv",        # k-fold cross-validation
+  number = 5,           # 5-fold
+  verboseIter = TRUE,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary # for AUC, if needed
+)
+
+# Train XGBoost with caret
+xgb_tuned <- train(
+  x = X,
+  y = factor(y, levels = c(0,1)),  # caret needs factor for classification
+  trControl = train_control,
+  tuneGrid = xgb_grid,
+  method = "xgbTree",
+  metric = "ROC"  # or "Accuracy"
+)
+
+# View best parameters
+print(xgb_tuned$bestTune)
+
+# Make predictions
+pred <- predict(xgb_tuned, X)
+confusionMatrix(pred, factor(y, levels = c(0,1)))
+
 ```
 
