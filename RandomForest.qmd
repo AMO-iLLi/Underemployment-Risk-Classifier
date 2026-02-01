@@ -8,6 +8,9 @@ format: html
 library(tidyverse)
 library(ranger)
 library(randomForest)
+library(readr)
+library(xgboost)
+library(Matrix)
 
 set.seed(345)
 ```
@@ -16,7 +19,42 @@ set.seed(345)
 ```{r}
 
 sample_submission <- read_csv("sample_submission.csv")
-test_set <- read_csv("test.csv")
+test_set <- read_csv(
+  "test.csv",
+  col_types = cols(
+    id = col_double(),
+    
+    CERTLEVP  = col_factor(),
+    PGMCIPAP  = col_factor(),
+    PGM_P034  = col_factor(),
+    PGM_P036  = col_factor(),
+    HLOSGRDP  = col_factor(),
+    PREVLEVP  = col_factor(),
+    
+    PGM_280A  = col_factor(),
+    PGM_280B  = col_factor(),
+    PGM_280C  = col_factor(),
+    PGM_280F  = col_factor(),
+    PGM_P401 = col_factor(),
+    
+    STULOANS  = col_factor(),
+    DBTOTGRD = col_factor(),
+    SCHOLARP = col_factor(),
+    
+    GRADAGEP = col_factor(),
+    GENDER2  = col_factor(),
+    CTZSHIPP = col_factor(),
+    VISBMINP = col_factor(),
+    DDIS_FL  = col_factor(),
+    
+    PAR1GRD = col_factor(),
+    PAR2GRD = col_factor(),
+    
+    BEF_P140 = col_factor(),
+    BEF_160  = col_double()
+  )
+)
+
 
 train_set <- read_csv(
   "train.csv",
@@ -59,56 +97,352 @@ train_set <- read_csv(
     
     # Pre-program work
     BEF_P140 = col_factor(),
-    BEF_160  = col_double(),
-    overqualified = col_factor()
+    BEF_160  = col_double()
   )
 )
+
+train_set$overqualified <- factor(train_set$overqualified)
+```
+#Cleaning block
+```{r}
+# =========================
+# 0) Helpers
+# =========================
+
+get_mode <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) return(NA)
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+missing_rate <- function(x) mean(is.na(x))
+
+impute_with_value <- function(x, value) {
+  x[is.na(x)] <- value
+  x
+}
+
+# =========================
+# 1) Recode special missing codes -> NA
+#    (DO THIS FIRST)
+# =========================
+
+# BEF_160 is numeric with 99 = missing
+train_set$BEF_160[train_set$BEF_160 == 99] <- NA
+test_set$BEF_160[test_set$BEF_160 == 99]   <- NA
+
+# Categorical recoding
+# (treat 6 valid skip + 9 not stated + 99 not stated as NA based on variable)
+
+# CERTLEVP: 9 -> NA
+train_set$CERTLEVP[train_set$CERTLEVP == "9"] <- NA
+test_set$CERTLEVP[test_set$CERTLEVP == "9"]   <- NA
+
+# PGMCIPAP: 99 -> NA
+train_set$PGMCIPAP[train_set$PGMCIPAP == "99"] <- NA
+test_set$PGMCIPAP[test_set$PGMCIPAP == "99"]   <- NA
+
+# PGM_P034: 6,9 -> NA
+train_set$PGM_P034[train_set$PGM_P034 %in% c("6","9")] <- NA
+test_set$PGM_P034[test_set$PGM_P034 %in% c("6","9")]   <- NA
+
+# PGM_P036: 6,9 -> NA
+train_set$PGM_P036[train_set$PGM_P036 %in% c("6","9")] <- NA
+test_set$PGM_P036[test_set$PGM_P036 %in% c("6","9")]   <- NA
+
+# HLOSGRDP: 9 -> NA
+train_set$HLOSGRDP[train_set$HLOSGRDP == "9"] <- NA
+test_set$HLOSGRDP[test_set$HLOSGRDP == "9"]   <- NA
+
+# PREVLEVP: 9 -> NA
+train_set$PREVLEVP[train_set$PREVLEVP == "9"] <- NA
+test_set$PREVLEVP[test_set$PREVLEVP == "9"]   <- NA
+
+# PGM_280A/B/C/F: 6,9 -> NA
+for (v in c("PGM_280A","PGM_280B","PGM_280C","PGM_280F")) {
+  train_set[[v]][train_set[[v]] %in% c("6","9")] <- NA
+  test_set[[v]][test_set[[v]] %in% c("6","9")]   <- NA
+}
+
+# PGM_P401: 6,9 -> NA
+train_set$PGM_P401[train_set$PGM_P401 %in% c("6","9")] <- NA
+test_set$PGM_P401[test_set$PGM_P401 %in% c("6","9")]   <- NA
+
+# STULOANS: 6,9 -> NA
+train_set$STULOANS[train_set$STULOANS %in% c("6","9")] <- NA
+test_set$STULOANS[test_set$STULOANS %in% c("6","9")]   <- NA
+
+# DBTOTGRD: 6,9 -> NA
+train_set$DBTOTGRD[train_set$DBTOTGRD %in% c("6","9")] <- NA
+test_set$DBTOTGRD[test_set$DBTOTGRD %in% c("6","9")]   <- NA
+
+# SCHOLARP: 6,9 -> NA
+train_set$SCHOLARP[train_set$SCHOLARP %in% c("6","9")] <- NA
+test_set$SCHOLARP[test_set$SCHOLARP %in% c("6","9")]   <- NA
+
+# VISBMINP: 9 -> NA
+train_set$VISBMINP[train_set$VISBMINP == "9"] <- NA
+test_set$VISBMINP[test_set$VISBMINP == "9"]   <- NA
+
+# PAR1GRD / PAR2GRD: 6,9 -> NA
+for (v in c("PAR1GRD","PAR2GRD")) {
+  train_set[[v]][train_set[[v]] %in% c("6","9")] <- NA
+  test_set[[v]][test_set[[v]] %in% c("6","9")]   <- NA
+}
+
+# BEF_P140: 9 -> NA
+train_set$BEF_P140[train_set$BEF_P140 == "9"] <- NA
+test_set$BEF_P140[test_set$BEF_P140 == "9"]   <- NA
+
+
+# =========================
+# 2) Apply your 5% rule:
+#    - In TRAIN:
+#         <5% NA -> drop rows with NA in that column
+#         >=5% NA -> impute (mode / median)
+#    - In TEST:
+#         never drop rows (must predict all)
+#         just impute using TRAIN-derived values
+# =========================
+
+threshold <- 0.05
+
+# Identify feature columns (exclude target if present)
+target <- "overqualified"
+
+feature_cols <- setdiff(names(train_set), target)
+
+# We'll store imputers learned from train
+imputer <- list(mode = list(), median = list())
+
+# (A) First: handle dropping in TRAIN for columns with <5% missing
+drop_cols <- c()
+
+for (col in feature_cols) {
+  mr <- missing_rate(train_set[[col]])
+  if (mr > 0 && mr < threshold) {
+    drop_cols <- c(drop_cols, col)
+  }
+}
+
+# Drop rows in TRAIN that have NA in ANY of the low-missing columns
+if (length(drop_cols) > 0) {
+  keep_idx <- complete.cases(train_set[, drop_cols, drop = FALSE])
+  train_set <- train_set[keep_idx, ]
+}
+
+# (B) Second: impute remaining NAs (>=5% columns OR columns that still have NA)
+for (col in feature_cols) {
+
+  # skip id from imputation logic (usually no NA anyway, and not a predictor)
+  # if you want to keep id as a column but not as a feature later, that's fine.
+  if (col == "id") next
+
+  if (!any(is.na(train_set[[col]])) && !any(is.na(test_set[[col]]))) next
+
+  # numeric: BEF_160 median
+  if (col == "BEF_160") {
+    med <- median(train_set[[col]], na.rm = TRUE)
+    imputer$median[[col]] <- med
+
+    train_set[[col]] <- impute_with_value(train_set[[col]], med)
+    test_set[[col]]  <- impute_with_value(test_set[[col]],  med)
+
+  } else {
+    # categorical: mode from train
+    m <- get_mode(train_set[[col]])
+    imputer$mode[[col]] <- m
+
+    train_set[[col]] <- impute_with_value(train_set[[col]], m)
+    test_set[[col]]  <- impute_with_value(test_set[[col]],  m)
+
+    # make sure both are factors with consistent levels
+    # (union of levels from train + test after imputation)
+    all_levels <- sort(unique(c(as.character(train_set[[col]]), as.character(test_set[[col]]))))
+    train_set[[col]] <- factor(as.character(train_set[[col]]), levels = all_levels)
+    test_set[[col]]  <- factor(as.character(test_set[[col]]),  levels = all_levels)
+  }
+}
+
+# =========================
+# 3) Quick checks
+# =========================
+cat("Remaining NA in TRAIN:", sum(is.na(train_set)), "\n")
+cat("Remaining NA in TEST :", sum(is.na(test_set)), "\n")
+
+dim(train_set)
+dim(test_set)
+
+```
+
+
+#Confirm
+```{r}
+dim(train_set)
+dim(test_set)
 ```
 
 # Splitting data
 ```{r}
+#n <- nrow(train_set)
+#
+#prop_train <- 0.75
+#prop_test <- 0.25
+#
+#train_test <- sample(c("Train", "Test"),
+#                     size = n, replace = TRUE, 
+#                     prob = c(prop_train, prop_test))
+#
+#training_data <- train_set[train_test == "Train", ]
+#testing_data <- train_set[train_test == "Test",]
+
 n <- nrow(train_set)
+idx_train <- sample(seq_len(n), size = floor(0.75 * n), replace = FALSE)
 
-prop_train <- 0.75
-prop_test <- 0.25
+training_data <- train_set[idx_train, ]
+testing_data  <- train_set[-idx_train, ]
 
-train_test <- sample(c("Train", "Test"),
-                     size = n, replace = TRUE, 
-                     prob = c(prop_train, prop_test))
-
-training_data <- train_set[train_test == "Train", ]
-testing_data <- train_set[train_test == "Test",]
 ```
 
-# Random Forest
+#Random forest
 ```{r}
+tab <- table(training_data$overqualified)
 
 pro_rf <- randomForest(
   overqualified ~ . - id,
-  mtry = 9,
-  data = training_data %>% drop_na(),
-  importance = TRUE,
+  data = training_data,
+  mtry = 8,
   ntree = 1000,
-  keep.forest = TRUE
+  nodesize = 1,
+  importance = TRUE,
+  keep.forest = TRUE,
+  sampsize = rep(min(tab), 2)
 )
-
-
-all_mtry <- c(6,7,8,9,10,11)
-all_nodesize <- c(1,2,3,5,8,10,15,20)
-all_pars <- expand.grid(mtry = all_mtry, nodesize = all_nodesize)
-n_pars <- nrow(all_pars)
-
-```
-
-# Visuals
-```{r}
-plot(pro_rf, main = "OOB Error")
-
-plot(pro_rf, xlim = c(50, 1000), ylim = c(0.6, 0.8))
-
-hist(treesize(pro_rf))
 
 print(pro_rf)
 varImpPlot(pro_rf)
+
 ```
 
+# XGboost
+```{r}
+
+#pro_rf <- randomForest(
+#  overqualified ~ . - id,
+#  data = training_data,
+#  mtry = 8,
+#  ntree = 1000,
+#  nodesize = 1,
+#  importance = TRUE,
+#  keep.forest = TRUE,
+#  sampsize = rep(min(tab), 2)
+#)
+
+# =========================
+# XGBoost
+# =========================
+
+# Create design matrices (one-hot encoding)
+# NOTE: use the SAME formula for both so columns align.
+x_train <- sparse.model.matrix(overqualified ~ . - id, data = training_data)[, -1]
+x_valid <- sparse.model.matrix(overqualified ~ . - id, data = testing_data)[, -1]
+
+# Labels must be 0/1 numeric
+y_train <- as.numeric(as.character(training_data$overqualified))
+y_valid <- as.numeric(as.character(testing_data$overqualified))
+
+# DMatrix objects (more efficient)
+dtrain <- xgb.DMatrix(data = x_train, label = y_train)
+dvalid <- xgb.DMatrix(data = x_valid, label = y_valid)
+
+# Class imbalance handling (similar spirit to your balanced RF)
+neg <- sum(y_train == 0)
+pos <- sum(y_train == 1)
+scale_pos_weight <- neg / pos
+
+params <- list(
+  booster = "gbtree",
+  objective = "binary:logistic",
+  eval_metric = "logloss",
+  eta = 0.05,
+  max_depth = 6,
+  min_child_weight = 1,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  lambda = 1,
+  alpha = 0,
+  scale_pos_weight = scale_pos_weight
+)
+
+set.seed(345)
+xgb_fit <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 5000,
+  watchlist = list(train = dtrain, valid = dvalid),
+  early_stopping_rounds = 50,
+  verbose = 1
+)
+
+xgb_fit
+
+```
+
+## XGboost validation
+```{r}
+p_valid <- predict(xgb_fit, dvalid)
+pred_valid <- ifelse(p_valid >= 0.5, 1, 0)
+
+conf_mat <- table(True = y_valid, Pred = pred_valid)
+conf_mat
+
+acc <- mean(pred_valid == y_valid)
+acc
+```
+
+#Feature importance plot (nice for your report)
+```{r}
+imp <- xgb.importance(model = xgb_fit)
+head(imp, 15)
+xgb.plot.importance(imp, top_n = 20)
+
+```
+
+#Train final XGBoost on full train and create submission
+```{r}
+# Build full train matrix
+x_full <- sparse.model.matrix(overqualified ~ . - id, data = train_set)[, -1]
+y_full <- as.numeric(as.character(train_set$overqualified))
+dfull <- xgb.DMatrix(data = x_full, label = y_full)
+
+# Build test matrix with matching columns using a dummy target
+tmp_test <- test_set
+tmp_test$overqualified <- factor(0, levels = levels(train_set$overqualified))
+x_test <- sparse.model.matrix(overqualified ~ . - id, data = tmp_test)[, -1]
+dtest <- xgb.DMatrix(data = x_test)
+
+neg_full <- sum(y_full == 0)
+pos_full <- sum(y_full == 1)
+params$scale_pos_weight <- neg_full / pos_full
+
+set.seed(345)
+xgb_full <- xgb.train(
+  params = params,
+  data = dfull,
+  nrounds = xgb_fit$best_iteration,
+  verbose = 0
+)
+
+test_prob <- predict(xgb_full, dtest)
+test_pred <- ifelse(test_prob >= 0.5, 1, 0)
+
+submission <- tibble(
+  id = test_set$id,
+  overqualified = test_pred
+)
+
+write_csv(submission, "submission_xgb.csv")
+submission |> head()
+
+```
