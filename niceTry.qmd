@@ -3,163 +3,110 @@ title: "niceTry"
 format: html
 ---
 
-```{r}
 
-# Libraries
+```{r}
+# -------------------------------
+# Load libraries
+# -------------------------------
 library(tidyverse)
-library(ranger)
-library(randomForest)
-library(caret)
 library(xgboost)
-library(pROC)
+library(caret)
 
-set.seed(345)
-```
+# -------------------------------
+# Read datasets
+# -------------------------------
+train_set <- read_csv("train.csv", 
+                      col_types = cols(
+                        id       = col_double(),
+                        CERTLEVP = col_factor(),
+                        PGMCIPAP = col_factor(),
+                        PGM_P034 = col_factor(),
+                        PGM_P036 = col_factor(),
+                        HLOSGRDP = col_factor(),
+                        PREVLEVP = col_factor(),
+                        PGM_280A = col_factor(),
+                        PGM_280B = col_factor(),
+                        PGM_280C = col_factor(),
+                        PGM_280F = col_factor(),
+                        PGM_P401 = col_factor(),
+                        STULOANS = col_factor(),
+                        DBTOTGRD = col_factor(),
+                        SCHOLARP = col_factor(),
+                        GRADAGEP = col_factor(),
+                        GENDER2  = col_factor(),
+                        CTZSHIPP = col_factor(),
+                        VISBMINP = col_factor(),
+                        DDIS_FL  = col_factor(),
+                        PAR1GRD  = col_factor(),
+                        PAR2GRD  = col_factor(),
+                        BEF_P140 = col_factor(),
+                        BEF_160  = col_double()
+                      ))
 
-```{r}
-# Read CSV files
-train_set <- read_csv(
-  "train.csv",
-  col_types = cols(
-    id       = col_double(),
-    CERTLEVP = col_factor(),
-    PGMCIPAP = col_factor(),
-    PGM_P034 = col_factor(),
-    PGM_P036 = col_factor(),
-    HLOSGRDP = col_factor(),
-    PREVLEVP = col_factor(),
-    PGM_280A = col_factor(),
-    PGM_280B = col_factor(),
-    PGM_280C = col_factor(),
-    PGM_280F = col_factor(),
-    PGM_P401 = col_factor(),
-    STULOANS = col_factor(),
-    DBTOTGRD = col_factor(),
-    SCHOLARP = col_factor(),
-    GRADAGEP = col_factor(),
-    GENDER2  = col_factor(),
-    CTZSHIPP = col_factor(),
-    VISBMINP = col_factor(),
-    DDIS_FL  = col_factor(),
-    PAR1GRD  = col_factor(),
-    PAR2GRD  = col_factor(),
-    BEF_P140 = col_factor(),
-    BEF_160  = col_double()
-  )
+test_set <- read_csv("test.csv", 
+                     col_types = cols(
+                        id       = col_double(),
+                        CERTLEVP = col_factor(),
+                        PGMCIPAP = col_factor(),
+                        PGM_P034 = col_factor(),
+                        PGM_P036 = col_factor(),
+                        HLOSGRDP = col_factor(),
+                        PREVLEVP = col_factor(),
+                        PGM_280A = col_factor(),
+                        PGM_280B = col_factor(),
+                        PGM_280C = col_factor(),
+                        PGM_280F = col_factor(),
+                        PGM_P401 = col_factor(),
+                        STULOANS = col_factor(),
+                        DBTOTGRD = col_factor(),
+                        SCHOLARP = col_factor(),
+                        GRADAGEP = col_factor(),
+                        GENDER2  = col_factor(),
+                        CTZSHIPP = col_factor(),
+                        VISBMINP = col_factor(),
+                        DDIS_FL  = col_factor(),
+                        PAR1GRD  = col_factor(),
+                        PAR2GRD  = col_factor(),
+                        BEF_P140 = col_factor(),
+                        BEF_160  = col_double()
+                     ))
+
+# -------------------------------
+# Selected features (from RF importance)
+# -------------------------------
+vars_keep <- c(
+  "CERTLEVP", "PGMCIPAP", "PGM_P034", "PGM_P036", "PGM_280A", "PGM_280B", "PGM_P401",
+  "STULOANS", "SCHOLARP", "PREVLEVP", "HLOSGRDP", "GRADAGEP",
+  "PAR1GRD", "PAR2GRD", "BEF_P140", "BEF_160",
+  "CTZSHIPP", "GENDER2"
 )
 
-train_set$overqualified <- factor(train_set$overqualified, levels = c(0,1))
+# -------------------------------
+# Encode categorical variables as integers
+# -------------------------------
+categorical_cols <- vars_keep[sapply(train_set[vars_keep], is.factor)]
 
-```
-
-```{r}
-prop_train <- 0.75
-n <- nrow(train_set)
-
-train_idx <- sample(seq_len(n), size = round(prop_train * n))
-training_data <- train_set[train_idx, ] %>% drop_na()
-testing_data  <- train_set[-train_idx, ] %>% drop_na()
-
-
-```
-
-```{r}
-# Parameters to tune
-all_mtry <- c(6,7,8,9,10,11,12,15)
-all_nodesize <- c(1,2,3,5,8,10,15,20)
-all_pars <- expand.grid(mtry = all_mtry, nodesize = all_nodesize)
-M <- 5  # folds
-
-# Cross-validation fold IDs
-fold_id <- sample(rep(1:M, length.out = nrow(training_data)))
-
-# Store CV errors
-CV_errors <- matrix(0, nrow = M, ncol = nrow(all_pars))
-
-# Classification error function
-get_class_error <- function(y_true, y_pred){
-  mean(y_true != y_pred)
-}
-
-# Cross-validation loop
-for(i in 1:nrow(all_pars)){
-  this_mtry <- all_pars$mtry[i]
-  this_nodesize <- all_pars$nodesize[i]
-  
-  for(j in 1:M){
-    train_fold <- training_data[fold_id != j, ]
-    val_fold   <- training_data[fold_id == j, ]
-    
-    fit_rf <- ranger(
-      overqualified ~ . - id,
-      data = train_fold,
-      mtry = this_mtry,
-      min.node.size = this_nodesize,
-      num.trees = 500
-    )
-    
-    pred <- predict(fit_rf, val_fold)$predictions
-    CV_errors[j,i] <- get_class_error(val_fold$overqualified, pred)
-  }
-}
-
-# Best parameters
-best_idx <- which.min(colMeans(CV_errors))
-best_params_rf <- all_pars[best_idx, ]
-best_params_rf
-
-```
-
-```{r}
-# Train final Random Forest
-vars_keep <- names(training_data)
-rf_model <- randomForest(
-  overqualified ~ . - id,
-  data = training_data[, vars_keep],
-  importance = TRUE,
-  ntree = 500,
-  mtry = best_params_rf$mtry,
-  nodesize = best_params_rf$nodesize
-)
-
-# OOB error
-print(rf_model)
-
-# Variable Importance
-varImpPlot(rf_model)
-
-# Predictions on test set
-rf_pred <- predict(rf_model, testing_data)
-confusionMatrix(rf_pred, testing_data$overqualified)
-
-```
-
-```{r}
-# Label encode categorical columns
-categorical_cols <- names(training_data)[sapply(training_data, is.factor) & names(training_data) != "overqualified"]
 for(col in categorical_cols){
-  training_data[[col]] <- as.integer(as.factor(training_data[[col]])) - 1
-  testing_data[[col]]  <- as.integer(as.factor(testing_data[[col]])) - 1
+  # Combine train and test levels to avoid mismatch
+  levels_all <- union(levels(train_set[[col]]), levels(test_set[[col]]))
+  
+  train_set[[col]] <- as.integer(factor(train_set[[col]], levels = levels_all)) - 1
+  test_set[[col]]  <- as.integer(factor(test_set[[col]], levels = levels_all)) - 1
 }
-# Ensure factor levels are 0 and 1
-training_data$overqualified <- factor(training_data$overqualified, levels = c(0,1))
-testing_data$overqualified  <- factor(testing_data$overqualified, levels = c(0,1))
 
-# Convert to numeric 0/1
-y_train <- as.numeric(as.character(training_data$overqualified))
-y_test  <- as.numeric(as.character(testing_data$overqualified))
+# -------------------------------
+# Prepare matrices for XGBoost
+# -------------------------------
+X_train <- as.matrix(train_set %>% select(all_of(vars_keep)))
+y_train <- as.numeric(as.character(train_set$overqualified))  # 0/1 target
 
-# Prepare matrix
-X_train <- as.matrix(training_data %>% select(-overqualified, -id))
-X_test  <- as.matrix(testing_data %>% select(-overqualified, -id))
-
-# Convert factor to numeric 0/1
-y_train <- as.numeric(as.character(training_data$overqualified))
-y_test  <- as.numeric(as.character(testing_data$overqualified))
+X_test <- as.matrix(test_set %>% select(all_of(vars_keep)))
 
 dtrain <- xgb.DMatrix(data = X_train, label = y_train)
-dtest  <- xgb.DMatrix(data = X_test, label = y_test)
 
+# -------------------------------
+# XGBoost parameters
+# -------------------------------
 params <- list(
   objective = "binary:logistic",
   eval_metric = "auc",
@@ -169,6 +116,9 @@ params <- list(
   colsample_bytree = 0.8
 )
 
+# -------------------------------
+# Cross-validation to find best nrounds
+# -------------------------------
 cv <- xgb.cv(
   params = params,
   data = dtrain,
@@ -179,23 +129,31 @@ cv <- xgb.cv(
 )
 
 best_nrounds <- cv$best_iteration
+cat("Best nrounds:", best_nrounds, "\n")
 
+# -------------------------------
+# Train final model on all train data
+# -------------------------------
 xgb_model <- xgb.train(
   params = params,
   data = dtrain,
   nrounds = best_nrounds
 )
 
+# -------------------------------
+# Make predictions on test set
+# -------------------------------
+xgb_pred_prob <- predict(xgb_model, X_test)         # predicted probabilities
+xgb_pred <- ifelse(xgb_pred_prob > 0.5, 1, 0)      # convert to 0/1
 
-# Predictions and evaluation
-xgb_pred_prob <- predict(xgb_model, X_test)
-xgb_pred <- ifelse(xgb_pred_prob > 0.5, 1, 0)
+# Add predictions to test_set
+test_set$overqualified_pred <- xgb_pred
+test_set$overqualified_prob <- xgb_pred_prob
 
-confusionMatrix(factor(xgb_pred, levels = c(0,1)), factor(y_test, levels = c(0,1)))
+# View first few predictions
+head(test_set %>% select(id, overqualified_pred, overqualified_prob))
 
-# ROC and AUC
-roc_obj <- roc(y_test, xgb_pred_prob)
-auc(roc_obj)
-plot(roc_obj, main = "XGBoost ROC Curve")
+write_csv(test_set %>% select(id, overqualified_pred), "submission.csv")
 
 ```
+

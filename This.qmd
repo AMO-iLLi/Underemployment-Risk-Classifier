@@ -1,5 +1,265 @@
 ---
-title: "This"
+title: "niceTry"
 format: html
 ---
+
+```{r}
+
+# Libraries
+library(tidyverse)
+library(ranger)
+library(randomForest)
+library(caret)
+library(xgboost)
+library(pROC)
+
+set.seed(345)
+```
+
+```{r}
+# Read CSV files
+train_set <- read_csv(
+  "train.csv",
+  col_types = cols(
+    id       = col_double(),
+    CERTLEVP = col_factor(),
+    PGMCIPAP = col_factor(),
+    PGM_P034 = col_factor(),
+    PGM_P036 = col_factor(),
+    HLOSGRDP = col_factor(),
+    PREVLEVP = col_factor(),
+    PGM_280A = col_factor(),
+    PGM_280B = col_factor(),
+    PGM_280C = col_factor(),
+    PGM_280F = col_factor(),
+    PGM_P401 = col_factor(),
+    STULOANS = col_factor(),
+    DBTOTGRD = col_factor(),
+    SCHOLARP = col_factor(),
+    GRADAGEP = col_factor(),
+    GENDER2  = col_factor(),
+    CTZSHIPP = col_factor(),
+    VISBMINP = col_factor(),
+    DDIS_FL  = col_factor(),
+    PAR1GRD  = col_factor(),
+    PAR2GRD  = col_factor(),
+    BEF_P140 = col_factor(),
+    BEF_160  = col_double()
+  )
+)
+
+train_set$overqualified <- factor(train_set$overqualified, levels = c(0,1))
+
+```
+
+```{r}
+prop_train <- 0.75
+n <- nrow(train_set)
+
+train_idx <- sample(seq_len(n), size = round(prop_train * n))
+training_data <- train_set[train_idx, ] %>% drop_na()
+testing_data  <- train_set[-train_idx, ] %>% drop_na()
+
+
+```
+
+```{r}
+# Parameters to tune
+all_mtry <- c(6,7,8,9,10,11,12,15)
+all_nodesize <- c(1,2,3,5,8,10,15,20)
+all_pars <- expand.grid(mtry = all_mtry, nodesize = all_nodesize)
+M <- 5  # folds
+
+# Cross-validation fold IDs
+fold_id <- sample(rep(1:M, length.out = nrow(training_data)))
+
+# Store CV errors
+CV_errors <- matrix(0, nrow = M, ncol = nrow(all_pars))
+
+# Classification error function
+get_class_error <- function(y_true, y_pred){
+  mean(y_true != y_pred)
+}
+
+# Cross-validation loop
+for(i in 1:nrow(all_pars)){
+  this_mtry <- all_pars$mtry[i]
+  this_nodesize <- all_pars$nodesize[i]
+  
+  for(j in 1:M){
+    train_fold <- training_data[fold_id != j, ]
+    val_fold   <- training_data[fold_id == j, ]
+    
+    fit_rf <- ranger(
+      overqualified ~ . - id,
+      data = train_fold,
+      mtry = this_mtry,
+      min.node.size = this_nodesize,
+      num.trees = 500
+    )
+    
+    pred <- predict(fit_rf, val_fold)$predictions
+    CV_errors[j,i] <- get_class_error(val_fold$overqualified, pred)
+  }
+}
+
+# Best parameters
+best_idx <- which.min(colMeans(CV_errors))
+best_params_rf <- all_pars[best_idx, ]
+best_params_rf
+
+```
+
+```{r}
+# Train final Random Forest
+vars_keep <- names(training_data)
+rf_model <- randomForest(
+  overqualified ~ . - id,
+  data = training_data[, vars_keep],
+  importance = TRUE,
+  ntree = 500,
+  mtry = best_params_rf$mtry,
+  nodesize = best_params_rf$nodesize
+)
+
+# OOB error
+print(rf_model)
+
+# Variable Importance
+varImpPlot(rf_model)
+
+# Predictions on test set
+rf_pred <- predict(rf_model, testing_data)
+confusionMatrix(rf_pred, testing_data$overqualified)
+
+```
+
+```{r}
+# Label encode categorical columns
+categorical_cols <- names(training_data)[sapply(training_data, is.factor) & names(training_data) != "overqualified"]
+for(col in categorical_cols){
+  training_data[[col]] <- as.integer(as.factor(training_data[[col]])) - 1
+  testing_data[[col]]  <- as.integer(as.factor(testing_data[[col]])) - 1
+}
+# Ensure factor levels are 0 and 1
+training_data$overqualified <- factor(training_data$overqualified, levels = c(0,1))
+testing_data$overqualified  <- factor(testing_data$overqualified, levels = c(0,1))
+
+# Convert to numeric 0/1
+y_train <- as.numeric(as.character(training_data$overqualified))
+y_test  <- as.numeric(as.character(testing_data$overqualified))
+
+# Prepare matrix
+X_train <- as.matrix(training_data %>% select(-overqualified, -id))
+X_test  <- as.matrix(testing_data %>% select(-overqualified, -id))
+
+# Convert factor to numeric 0/1
+y_train <- as.numeric(as.character(training_data$overqualified))
+y_test  <- as.numeric(as.character(testing_data$overqualified))
+
+dtrain <- xgb.DMatrix(data = X_train, label = y_train)
+dtest  <- xgb.DMatrix(data = X_test, label = y_test)
+
+params <- list(
+  objective = "binary:logistic",
+  eval_metric = "auc",
+  max_depth = 6,
+  eta = 0.1,
+  subsample = 0.8,
+  colsample_bytree = 0.8
+)
+
+cv <- xgb.cv(
+  params = params,
+  data = dtrain,
+  nrounds = 500,
+  nfold = 5,
+  early_stopping_rounds = 10,
+  verbose = 1
+)
+
+best_nrounds <- cv$best_iteration
+
+xgb_model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = best_nrounds
+)
+
+
+# Predictions and evaluation
+xgb_pred_prob <- predict(xgb_model, X_test)
+xgb_pred <- ifelse(xgb_pred_prob > 0.5, 1, 0)
+
+confusionMatrix(factor(xgb_pred, levels = c(0,1)), factor(y_test, levels = c(0,1)))
+
+# ROC and AUC
+roc_obj <- roc(y_test, xgb_pred_prob)
+auc(roc_obj)
+plot(roc_obj, main = "XGBoost ROC Curve")
+
+```
+
+```{r}
+test_set <- read_csv(
+  "test.csv",
+  col_types = cols(
+    id       = col_double(),
+    CERTLEVP = col_factor(),
+    PGMCIPAP = col_factor(),
+    PGM_P034 = col_factor(),
+    PGM_P036 = col_factor(),
+    HLOSGRDP = col_factor(),
+    PREVLEVP = col_factor(),
+    PGM_280A = col_factor(),
+    PGM_280B = col_factor(),
+    PGM_280C = col_factor(),
+    PGM_280F = col_factor(),
+    PGM_P401 = col_factor(),
+    STULOANS = col_factor(),
+    DBTOTGRD = col_factor(),
+    SCHOLARP = col_factor(),
+    GRADAGEP = col_factor(),
+    GENDER2  = col_factor(),
+    CTZSHIPP = col_factor(),
+    VISBMINP = col_factor(),
+    DDIS_FL  = col_factor(),
+    PAR1GRD  = col_factor(),
+    PAR2GRD  = col_factor(),
+    BEF_P140 = col_factor(),
+    BEF_160  = col_double()
+  )
+)
+# --- Encode categorical columns using same mapping as training ---
+# Selected features (exclude target and id)
+vars_keep <- names(training_data)[!names(training_data) %in% c("id", "overqualified")]
+
+# Ensure all categorical columns are numeric 0/1, same mapping for test set
+categorical_cols <- vars_keep[sapply(training_data[vars_keep], is.factor)]
+
+for(col in categorical_cols){
+  # Create factor levels based on training data
+  levels_train <- sort(unique(training_data[[col]]))
+  
+  training_data[[col]] <- as.integer(factor(training_data[[col]], levels = levels_train)) - 1
+  test_set[[col]]      <- as.integer(factor(test_set[[col]], levels = levels_train)) - 1
+}
+
+# Make sure remaining numeric columns are actually numeric
+numeric_cols <- setdiff(vars_keep, categorical_cols)
+
+for(col in numeric_cols){
+  training_data[[col]] <- as.numeric(training_data[[col]])
+  test_set[[col]]      <- as.numeric(test_set[[col]])
+}
+
+# Prepare matrices for XGBoost
+X_train <- as.matrix(training_data[, vars_keep])
+X_test  <- as.matrix(test_set[, vars_keep])
+
+y_train <- as.numeric(as.character(training_data$overqualified))  # 0/1 target
+
+dtrain <- xgb.DMatrix(data = X_train, label = y_train)
+
+```
 

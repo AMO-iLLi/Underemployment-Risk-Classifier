@@ -3,3 +3,146 @@ title: "h"
 format: html
 ---
 
+```{r}
+# --- 1. Read datasets ---
+train_set <- read_csv("train.csv", col_types = cols(
+  id       = col_double(),
+  CERTLEVP = col_factor(),
+  PGMCIPAP = col_factor(),
+  PGM_P034 = col_factor(),
+  PGM_P036 = col_factor(),
+  HLOSGRDP = col_factor(),
+  PREVLEVP = col_factor(),
+  PGM_280A = col_factor(),
+  PGM_280B = col_factor(),
+  PGM_280C = col_factor(),
+  PGM_280F = col_factor(),
+  PGM_P401 = col_factor(),
+  STULOANS = col_factor(),
+  DBTOTGRD = col_factor(),
+  SCHOLARP = col_factor(),
+  GRADAGEP = col_factor(),
+  GENDER2  = col_factor(),
+  CTZSHIPP = col_factor(),
+  VISBMINP = col_factor(),
+  DDIS_FL  = col_factor(),
+  PAR1GRD  = col_factor(),
+  PAR2GRD  = col_factor(),
+  BEF_P140 = col_factor(),
+  BEF_160  = col_double()
+))
+
+train_set$overqualified <- factor(train_set$overqualified, levels = c(0,1))
+
+test_set <- read_csv("test.csv", col_types = cols(
+  id       = col_double(),
+  CERTLEVP = col_factor(),
+  PGMCIPAP = col_factor(),
+  PGM_P034 = col_factor(),
+  PGM_P036 = col_factor(),
+  HLOSGRDP = col_factor(),
+  PREVLEVP = col_factor(),
+  PGM_280A = col_factor(),
+  PGM_280B = col_factor(),
+  PGM_280C = col_factor(),
+  PGM_280F = col_factor(),
+  PGM_P401 = col_factor(),
+  STULOANS = col_factor(),
+  DBTOTGRD = col_factor(),
+  SCHOLARP = col_factor(),
+  GRADAGEP = col_factor(),
+  GENDER2  = col_factor(),
+  CTZSHIPP = col_factor(),
+  VISBMINP = col_factor(),
+  DDIS_FL  = col_factor(),
+  PAR1GRD  = col_factor(),
+  PAR2GRD  = col_factor(),
+  BEF_P140 = col_factor(),
+  BEF_160  = col_double()
+))
+
+
+```
+
+```{r}
+# --- 2. Encode categorical columns ---
+vars_keep <- names(train_set)[!names(train_set) %in% c("id", "overqualified")]
+categorical_cols <- vars_keep[sapply(train_set[vars_keep], is.factor)]
+
+for(col in categorical_cols){
+  # Use same levels for train and test
+  levels_train <- sort(unique(train_set[[col]]))
+  
+  train_set[[col]] <- as.integer(factor(train_set[[col]], levels = levels_train)) - 1
+  test_set[[col]]  <- as.integer(factor(test_set[[col]], levels = levels_train)) - 1
+}
+
+# Convert numeric columns to numeric
+numeric_cols <- setdiff(vars_keep, categorical_cols)
+for(col in numeric_cols){
+  train_set[[col]] <- as.numeric(train_set[[col]])
+  test_set[[col]]  <- as.numeric(test_set[[col]])
+}
+
+```
+
+```{r}
+# --- 3. Prepare matrices ---
+X_train <- as.matrix(train_set[, vars_keep])
+y_train <- as.numeric(as.character(train_set$overqualified))  # 0/1 target
+
+dtrain <- xgb.DMatrix(data = X_train, label = y_train)
+
+# Prepare test matrix
+X_test <- as.matrix(test_set[, vars_keep])
+dtest <- xgb.DMatrix(data = X_test)
+
+```
+
+```{r}
+# --- 4. Train XGBoost ---
+params <- list(
+  objective = "binary:logistic",
+  eval_metric = "auc",
+  max_depth = 6,
+  eta = 0.1,
+  subsample = 0.8,
+  colsample_bytree = 0.8
+)
+
+cv <- xgb.cv(
+  params = params,
+  data = dtrain,
+  nrounds = 500,
+  nfold = 5,
+  early_stopping_rounds = 10,
+  verbose = 1
+)
+
+best_nrounds <- cv$best_iteration
+
+xgb_model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = best_nrounds
+)
+
+```
+
+```{r}
+# --- 5. Predict on test set ---
+xgb_pred_prob <- predict(xgb_model, dtest)
+xgb_pred <- ifelse(xgb_pred_prob > 0.3, 1, 0)
+
+# Add predictions to test set
+test_set$overqualified_pred <- xgb_pred
+test_set$overqualified_prob <- xgb_pred_prob
+
+# Save submission
+write_csv(test_set %>% select(id, overqualified_pred), "submission.csv")
+
+# View first few predictions
+head(test_set %>% select(id, overqualified_pred, overqualified_prob))
+
+```
+
