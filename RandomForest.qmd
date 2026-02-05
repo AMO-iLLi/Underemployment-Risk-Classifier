@@ -23,9 +23,6 @@ train_set <- read_csv(
   col_types = cols(
     id            = col_double(),
     
-    # Target
-    overqualified = col_double(),
-    
     # Education & Program Features
     CERTLEVP  = col_factor(),
     PGMCIPAP  = col_factor(),
@@ -80,6 +77,17 @@ test_set  <- replace_na_999(test_set)
 sapply(train_set, function(x) sum(is.na(x)))
 levels(train_set$CERTLEVP)
 
+library(forcats)
+library(dplyr)
+
+train_set <- train_set %>%
+  mutate(across(everything(), ~ as.factor(.))) %>%
+  mutate(across(everything(), ~ fct_explicit_na(.x, na_level = "Missing")))
+
+test_set <- test_set %>%
+  mutate(across(everything(), ~ as.factor(.))) %>%
+  mutate(across(everything(), ~ fct_explicit_na(.x, na_level = "Missing")))
+
 train_set <- train_set %>% select(-id)
 test_set  <- test_set  %>% select(-id)
 
@@ -98,7 +106,7 @@ train_test <- sample(c("Train", "Test"),
                      size = n, replace = TRUE, 
                      prob = c(prop_train, prop_test))
 
-training_data <- train_set[train_test == "Train", ]
+iting_data <- train_set[train_test == "Train", ]
 testing_data <- train_set[train_test == "Test",]
 ```
 
@@ -116,14 +124,53 @@ rf_model <- randomForest(
   importance = TRUE
 )
 rf_model
+# OOB predicted probabilities for class "1"
+oob_probs <- rf_model$votes[, "1"]
 
+roc_obj_oob <- roc(
+  response  = train_set$overqualified,
+  predictor = oob_probs,
+  levels = c("0","1"),
+  direction = "<"
+)
 
+auc(roc_obj_oob)
 
 
 all_mtry <- c(6,7,8,9,10,11)
 all_nodesize <- c(1,2,3,5,8,10,15,20)
 all_pars <- expand.grid(mtry = all_mtry, nodesize = all_nodesize)
 n_pars <- nrow(all_pars)
+
+```
+#randome forest 3
+```{r}
+set.seed(42)
+
+rf_model3 <- randomForest(
+  overqualified ~ .,
+  data = train_set,
+  ntree = 800,
+  mtry = 6,
+  nodesize = 10,
+  classwt = c("0"=1, "1"=2),
+  importance = TRUE
+)
+
+rf_model3
+
+library(pROC)
+
+oob_probs3 <- rf_model3$votes[, "1"]
+
+roc_obj3 <- roc(
+  response  = train_set$overqualified,
+  predictor = oob_probs3,
+  levels = c("0","1"),
+  direction = "<"
+)
+
+auc(roc_obj3)
 
 ```
 
@@ -138,3 +185,494 @@ hist(treesize(pro_rf))
 print(pro_rf)
 varImpPlot(pro_rf)
 ```
+
+# FIX THIS CODE
+```{r}
+# ============================================================
+# Random Forest Challenger — adapted to YOUR train_set structure
+# Target: overqualified (factor with levels "0","1")
+# Data already prepared above: train_set (no id), test_set (no id)
+# ============================================================
+
+library(dplyr)
+library(caret)
+library(pROC)
+library(randomForest)
+
+# --- Step 0: Safety checks / ensure correct factor levels ---
+stopifnot("overqualified" %in% names(train_set))
+train_set$overqualified <- factor(train_set$overqualified, levels = c("0","1"))
+
+# --- Step 1: Train/Validation split (stratified) ---
+set.seed(445)
+idx <- createDataPartition(train_set$overqualified, p = 0.60, list = FALSE)
+
+estimation <- train_set[idx, , drop = FALSE]
+validation <- train_set[-idx, , drop = FALSE]
+
+# --- Step 2: Balanced training sample (undersample majority class) ---
+set.seed(123)
+n_min <- min(table(estimation$overqualified))
+
+estimation_balanced <- estimation %>%
+  group_by(overqualified) %>%
+  sample_n(size = n_min) %>%
+  ungroup()
+
+cat("\nClass proportions (estimation vs balanced):\n")
+print(prop.table(table(estimation$overqualified)))
+print(prop.table(table(estimation_balanced$overqualified)))
+
+# --- Step 3: Logistic Regression baseline (imbalanced) ---
+# Use all predictors (they're mostly factors in your pipeline)
+
+# --- FIX: align factor levels between train (estimation) and newdata (validation/test) ---
+align_levels <- function(train_df, new_df, outcome = "overqualified", unknown_level = "Missing") {
+  # make sure unknown_level exists in training factors (except outcome)
+  for (nm in names(train_df)) {
+    if (nm == outcome) next
+    if (is.factor(train_df[[nm]])) {
+      if (!(unknown_level %in% levels(train_df[[nm]]))) {
+        levels(train_df[[nm]]) <- c(levels(train_df[[nm]]), unknown_level)
+      }
+    }
+  }
+
+  # coerce new_df columns to training factor levels; unseen -> unknown_level
+  for (nm in intersect(names(train_df), names(new_df))) {
+    if (nm == outcome) next
+    if (is.factor(train_df[[nm]])) {
+      x <- as.character(new_df[[nm]])
+      x[is.na(x)] <- unknown_level
+      x[!(x %in% levels(train_df[[nm]]))] <- unknown_level
+      new_df[[nm]] <- factor(x, levels = levels(train_df[[nm]]))
+    }
+  }
+  new_df
+}
+
+# Apply after split:
+validation <- align_levels(estimation, validation, outcome = "overqualified", unknown_level = "Missing")
+
+# If you will predict on test_set too:
+test_set <- align_levels(estimation, test_set, outcome = "overqualified", unknown_level = "Missing")
+
+
+# Predicted probability of class "1"
+
+# --- Step 4: Random Forest models ---
+# Pick a reasonable default mtry if you don't want to tune
+mtry_val <- floor(sqrt(ncol(estimation) - 1))
+
+set.seed(123)
+rf_unbal <- randomForest(
+  overqualified ~ .,
+  data = estimation,
+  ntree = 1000,
+  mtry = mtry_val,
+  importance = TRUE
+)
+
+set.seed(123)
+rf_bal <- randomForest(
+  overqualified ~ .,
+  data = estimation_balanced,
+  ntree = 1000,
+  mtry = mtry_val,
+  importance = TRUE
+)
+
+# --- Step 5: Probability adjustment for the balanced RF ---
+# True and sample prevalence (class "1")
+pi_true   <- mean(estimation$overqualified == "1")
+pi_sample <- mean(estimation_balanced$overqualified == "1")  # ~0.50
+
+# correction on log-odds
+adj_factor <- log((pi_true * (1 - pi_sample)) / (pi_sample * (1 - pi_true)))
+
+# RF predicted probs for class "1"
+validation$prob_rf_unbal <- predict(rf_unbal, newdata = validation, type = "prob")[, "1"]
+
+prob_rf_bal_unadj <- predict(rf_bal, newdata = validation, type = "prob")[, "1"]
+prob_rf_bal_unadj <- pmin(pmax(prob_rf_bal_unadj, 1e-6), 1 - 1e-6)  # avoid log(0)
+
+logit_bal     <- log(prob_rf_bal_unadj / (1 - prob_rf_bal_unadj))
+logit_bal_adj <- logit_bal + adj_factor
+
+validation$prob_rf_bal_adj <- exp(logit_bal_adj) / (1 + exp(logit_bal_adj))
+
+# --- Step 6: Metrics helper ---
+get_metrics <- function(prob, truth, cutoff = 0.5) {
+  truth <- factor(truth, levels = c("0","1"))
+  pred  <- factor(ifelse(prob > cutoff, "1", "0"), levels = c("0","1"))
+
+  cm <- confusionMatrix(pred, truth, positive = "1")
+  roc_obj <- roc(truth, prob, levels = c("0","1"), direction = "<")
+  auc_val <- as.numeric(auc(roc_obj))
+
+  data.frame(
+    Accuracy    = unname(cm$overall["Accuracy"]),
+    Sensitivity = unname(cm$byClass["Sensitivity"]),
+    Specificity = unname(cm$byClass["Specificity"]),
+    AUC         = auc_val
+  )
+}
+
+# --- Step 7: Compare models ---
+m_logit      <- get_metrics(validation$prob_logit,      validation$overqualified)
+m_rf_unbal   <- get_metrics(validation$prob_rf_unbal,   validation$overqualified)
+m_rf_bal_adj <- get_metrics(validation$prob_rf_bal_adj, validation$overqualified)
+
+compare_metrics <- bind_rows(
+  cbind(Model = "Logistic Regression (Imbalanced)", m_logit),
+  cbind(Model = "Random Forest (Imbalanced)",       m_rf_unbal),
+  cbind(Model = "Random Forest (Balanced Adjusted)",m_rf_bal_adj)
+) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+cat("\n=== Model Performance Comparison (Validation) ===\n")
+print(compare_metrics)
+
+# --- Step 8: Variable importance plot (balanced RF) ---
+varImpPlot(
+  rf_bal,
+  main = "Variable Importance — RF (Balanced; probabilities adjusted separately)",
+  type = 2,
+  n.var = 15,
+  cex = 0.8
+)
+
+
+```
+
+```{r}
+# ============================================================
+# Random Forest Challenger — adapted to YOUR train_set structure
+# Target: overqualified (factor with levels "0","1")
+# ============================================================
+
+library(dplyr)
+library(caret)
+library(pROC)
+library(randomForest)
+
+# --- Step 0: Ensure target levels ---
+stopifnot("overqualified" %in% names(train_set))
+train_set$overqualified <- factor(train_set$overqualified, levels = c("0","1"))
+
+# --- Step 1: Train/Validation split (stratified) ---
+set.seed(445)
+idx <- createDataPartition(train_set$overqualified, p = 0.60, list = FALSE)
+estimation <- train_set[idx, , drop = FALSE]
+validation <- train_set[-idx, , drop = FALSE]
+
+# --- Step 2: Align factor levels (CRITICAL: do this BEFORE fitting models) ---
+align_levels <- function(train_df, new_df, outcome = "overqualified", unknown_level = "Missing") {
+  # ensure unknown_level exists in training factor levels
+  for (nm in names(train_df)) {
+    if (nm == outcome) next
+    if (is.factor(train_df[[nm]])) {
+      if (!(unknown_level %in% levels(train_df[[nm]]))) {
+        levels(train_df[[nm]]) <- c(levels(train_df[[nm]]), unknown_level)
+      }
+    }
+  }
+
+  # force new_df factors to use training levels; unseen -> unknown_level
+  for (nm in intersect(names(train_df), names(new_df))) {
+    if (nm == outcome) next
+    if (is.factor(train_df[[nm]])) {
+      x <- as.character(new_df[[nm]])
+      x[is.na(x)] <- unknown_level
+      x[!(x %in% levels(train_df[[nm]]))] <- unknown_level
+      new_df[[nm]] <- factor(x, levels = levels(train_df[[nm]]))
+    }
+  }
+  new_df
+}
+
+# Make validation/test consistent with estimation
+validation <- align_levels(estimation, validation, outcome = "overqualified", unknown_level = "Missing")
+test_set   <- align_levels(estimation, test_set,   outcome = "overqualified", unknown_level = "Missing")
+
+# --- Step 3: Balanced training sample (undersample majority class) ---
+set.seed(123)
+n_min <- min(table(estimation$overqualified))
+estimation_balanced <- estimation %>%
+  group_by(overqualified) %>%
+  sample_n(size = n_min) %>%
+  ungroup()
+
+cat("\nClass proportions (estimation vs balanced):\n")
+print(prop.table(table(estimation$overqualified)))
+print(prop.table(table(estimation_balanced$overqualified)))
+
+# --- Step 4: Logistic Regression baseline (fit AFTER alignment) ---
+
+
+# --- Step 5: Random Forest models ---
+mtry_val <- floor(sqrt(ncol(estimation) - 1))
+
+set.seed(123)
+rf_unbal <- randomForest(
+  overqualified ~ .,
+  data = estimation,
+  ntree = 1000,
+  mtry = mtry_val,
+  importance = TRUE
+)
+
+set.seed(123)
+rf_bal <- randomForest(
+  overqualified ~ .,
+  data = estimation_balanced,
+  ntree = 1000,
+  mtry = mtry_val,
+  importance = TRUE
+)
+
+# --- Step 6: Probability adjustment for balanced RF ---
+pi_true   <- mean(estimation$overqualified == "1")
+pi_sample <- mean(estimation_balanced$overqualified == "1")  # ~0.50
+
+adj_factor <- log((pi_true * (1 - pi_sample)) / (pi_sample * (1 - pi_true)))
+
+validation$prob_rf_unbal <- predict(rf_unbal, newdata = validation, type = "prob")[, "1"]
+
+prob_rf_bal_unadj <- predict(rf_bal, newdata = validation, type = "prob")[, "1"]
+prob_rf_bal_unadj <- pmin(pmax(prob_rf_bal_unadj, 1e-6), 1 - 1e-6)
+
+logit_bal     <- log(prob_rf_bal_unadj / (1 - prob_rf_bal_unadj))
+logit_bal_adj <- logit_bal + adj_factor
+validation$prob_rf_bal_adj <- exp(logit_bal_adj) / (1 + exp(logit_bal_adj))
+
+# --- Step 7: Metrics helper ---
+get_metrics <- function(prob, truth, cutoff = 0.5) {
+  truth <- factor(truth, levels = c("0","1"))
+  pred  <- factor(ifelse(prob > cutoff, "1", "0"), levels = c("0","1"))
+
+  cm <- confusionMatrix(pred, truth, positive = "1")
+  roc_obj <- roc(truth, prob, levels = c("0","1"), direction = "<")
+  auc_val <- as.numeric(auc(roc_obj))
+
+  data.frame(
+    Accuracy    = unname(cm$overall["Accuracy"]),
+    Sensitivity = unname(cm$byClass["Sensitivity"]),
+    Specificity = unname(cm$byClass["Specificity"]),
+    AUC         = auc_val
+  )
+}
+
+# --- Step 8: Compare models ---
+compare_metrics <- bind_rows(
+  cbind(Model = "Logistic Regression (Imbalanced)", get_metrics(validation$prob_logit,      validation$overqualified)),
+  cbind(Model = "Random Forest (Imbalanced)",       get_metrics(validation$prob_rf_unbal,   validation$overqualified)),
+  cbind(Model = "Random Forest (Balanced Adjusted)",get_metrics(validation$prob_rf_bal_adj, validation$overqualified))
+) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+cat("\n=== Model Performance Comparison (Validation) ===\n")
+print(compare_metrics)
+
+# --- Step 9: Variable importance plot ---
+varImpPlot(
+  rf_bal,
+  main = "Variable Importance — RF (Balanced; probabilities adjusted separately)",
+  type = 2,
+  n.var = 15,
+  cex = 0.8
+)
+
+```
+
+```{r}
+library(dplyr)
+library(caret)
+library(pROC)
+library(randomForest)
+
+stopifnot("overqualified" %in% names(train_set))
+train_set$overqualified <- factor(train_set$overqualified, levels = c("0","1"))
+
+# --- Split ---
+set.seed(445)
+idx <- createDataPartition(train_set$overqualified, p = 0.60, list = FALSE)
+estimation <- train_set[idx, , drop = FALSE]
+validation <- train_set[-idx, , drop = FALSE]
+
+# --- Helpers: make characters factors; add Missing to TRAIN; align newdata to TRAIN levels ---
+to_factor <- function(df) {
+  df %>% mutate(across(where(is.character), as.factor))
+}
+
+
+add_missing_level <- function(df, outcome = "overqualified", unknown_level = "Missing") {
+  for (nm in names(df)) {
+    if (nm == outcome) next
+    if (is.factor(df[[nm]]) && !(unknown_level %in% levels(df[[nm]]))) {
+      df[[nm]] <- factor(df[[nm]], levels = c(levels(df[[nm]]), unknown_level))
+    }
+  }
+  df
+}
+
+align_to_train <- function(train_df, new_df, outcome = "overqualified", unknown_level = "Missing") {
+  for (nm in intersect(names(train_df), names(new_df))) {
+    if (nm == outcome) next
+    if (is.factor(train_df[[nm]])) {
+      x <- as.character(new_df[[nm]])
+      x[is.na(x)] <- unknown_level
+      x[!(x %in% levels(train_df[[nm]]))] <- unknown_level
+      new_df[[nm]] <- factor(x, levels = levels(train_df[[nm]]))
+    }
+  }
+  new_df
+}
+
+# --- Apply preprocessing consistently ---
+estimation <- to_factor(estimation)
+validation <- to_factor(validation)
+test_set   <- to_factor(test_set)
+
+estimation <- add_missing_level(estimation, unknown_level = "Missing")
+validation <- align_to_train(estimation, validation, unknown_level = "Missing")
+test_set   <- align_to_train(estimation, test_set,   unknown_level = "Missing")
+
+# --- Balanced training sample (undersample) ---
+set.seed(123)
+n_min <- min(table(estimation$overqualified))
+estimation_balanced <- estimation %>%
+  group_by(overqualified) %>%
+  sample_n(size = n_min) %>%
+  ungroup()
+
+cat("\nClass proportions (estimation vs balanced):\n")
+print(prop.table(table(estimation$overqualified)))
+print(prop.table(table(estimation_balanced$overqualified)))
+
+# --- Train RFs ---
+mtry_val <- floor(sqrt(ncol(estimation) - 1))
+
+set.seed(123)
+rf_unbal <- randomForest(
+  overqualified ~ .,
+  data = estimation,
+  ntree = 1000,
+  mtry = mtry_val,
+  importance = TRUE
+)
+
+set.seed(123)
+rf_bal <- randomForest(
+  overqualified ~ .,
+  data = estimation_balanced,
+  ntree = 1000,
+  mtry = mtry_val,
+  importance = TRUE
+)
+
+# --- Balanced probability adjustment ---
+pi_true   <- mean(estimation$overqualified == "1")
+pi_sample <- mean(estimation_balanced$overqualified == "1")  # 0.5
+
+adj_factor <- log((pi_true * (1 - pi_sample)) / (pi_sample * (1 - pi_true)))
+
+# --- Predict on validation ---
+p_unbal <- predict(rf_unbal, newdata = validation, type = "prob")[, "1"]
+
+p_bal <- predict(rf_bal, newdata = validation, type = "prob")[, "1"]
+p_bal <- pmin(pmax(p_bal, 1e-6), 1 - 1e-6)
+logit_bal_adj <- log(p_bal / (1 - p_bal)) + adj_factor
+p_bal_adj <- exp(logit_bal_adj) / (1 + exp(logit_bal_adj))
+
+# --- Metrics (AUC + confusion matrix at cutoff) ---
+get_metrics <- function(prob, truth, cutoff = 0.5) {
+  truth <- factor(truth, levels = c("0","1"))
+  pred  <- factor(ifelse(prob > cutoff, "1", "0"), levels = c("0","1"))
+
+  cm <- confusionMatrix(pred, truth, positive = "1")
+  roc_obj <- roc(truth, prob, levels = c("0","1"), direction = "<")
+  auc_val <- as.numeric(auc(roc_obj))
+
+  data.frame(
+    Accuracy    = unname(cm$overall["Accuracy"]),
+    Sensitivity = unname(cm$byClass["Sensitivity"]),
+    Specificity = unname(cm$byClass["Specificity"]),
+    AUC         = auc_val
+  )
+}
+
+m_rf_unbal <- get_metrics(p_unbal, validation$overqualified)
+m_rf_baladj <- get_metrics(p_bal_adj, validation$overqualified)
+
+compare_metrics <- bind_rows(
+  cbind(Model = "RF (Imbalanced)", m_rf_unbal),
+  cbind(Model = "RF (Balanced + prior adjusted)", m_rf_baladj)
+) %>% mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+cat("\n=== RF Performance Comparison (Validation) ===\n")
+print(compare_metrics)
+
+# --- Variable importance plot (balanced RF) ---
+varImpPlot(
+  rf_bal,
+  main = "Variable Importance — RF (Balanced; probs adjusted)",
+  type = 2,
+  n.var = 15,
+  cex = 0.8
+)
+
+```
+
+```{r}
+class_weights <- c(
+  "0" = 1,
+  "1" = sum(estimation$overqualified == "0") /
+        sum(estimation$overqualified == "1")
+)
+
+set.seed(123)
+
+rf_weighted <- randomForest(
+  overqualified ~ .,
+  data = estimation,
+  ntree = 1200,
+  mtry = floor(sqrt(ncol(estimation) - 1)),
+  nodesize = 5,
+  classwt = class_weights,
+  importance = TRUE
+)
+p_weighted <- predict(rf_weighted, validation, type="prob")[,"1"]
+m_rf_weighted <- get_metrics(p_weighted, validation$overqualified)
+m_rf_weighted
+
+mtry_grid <- seq(2, max(2, floor(sqrt(ncol(estimation) - 1))), by = 2)
+
+auc_results <- data.frame(mtry = integer(), AUC = numeric())
+
+for (m in mtry_grid) {
+
+  rf_tmp <- randomForest(
+    overqualified ~ .,
+    data = estimation,
+    ntree = 600,
+    mtry = m,
+    nodesize = 5,
+    classwt = c(
+      "0" = 1,
+      "1" = sum(estimation$overqualified == "0") / sum(estimation$overqualified == "1")
+    )
+  )
+
+  p <- predict(rf_tmp, validation, type = "prob")[, "1"]
+  roc_obj <- roc(validation$overqualified, p, levels = c("0","1"), direction = "<")
+  auc_val <- as.numeric(auc(roc_obj))   # <- key fix
+
+  auc_results <- rbind(auc_results, data.frame(mtry = m, AUC = auc_val))
+}
+
+auc_results[order(auc_results$AUC, decreasing = TRUE), ]
+auc_results$AUC <- as.numeric(auc_results$AUC)
+
+```
+
