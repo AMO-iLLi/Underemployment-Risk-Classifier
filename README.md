@@ -83,4 +83,4 @@ The gap between training and CV AUC highlights the importance of **regularizatio
 - Ilia Janfeshan
 - Georgi Kuzhel
 - Matin Meraj Mohammadi
--J ulia Kristensen
+- Julia Kristensen
