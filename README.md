@@ -78,4 +78,9 @@ The gap between training and CV AUC highlights the importance of **regularizatio
 - Regularization is critical for survey data
 - Cross-validation is essential for generalization
 
+## Credit
 
+-Ilia Janfeshan
+-Georgi Kuzhel
+-Matin Meraj Mohammadi
+-Julia Kristensen
